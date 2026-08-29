@@ -71,7 +71,6 @@ jobs:
             --enable-ext-colors \
             --enable-ext-mouse \
             --enable-sp-funcs \
-            --enable-term-driver \
             --enable-sigwinch
 
       - name: Build ncurses
