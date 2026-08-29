@@ -68,6 +68,7 @@ jobs:
             rsync \
             xz-utils \
             zstd \
+            rdfind \
             tar \
             wget \
             perl \
