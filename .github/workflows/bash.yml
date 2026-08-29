@@ -1,0 +1,168 @@
+name: Build Bash 5.3.15
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    env:
+      VERSION: "5.3"
+      PATCHLEVEL: "15"
+      FULL_VERSION: "5.3.15"
+      PKGNAME: "bash"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libncurses-dev \
+            gettext \
+            bison \
+            patch \
+            wget \
+            tar \
+            gzip \
+            zstd
+
+      - name: Prepare directories
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/src"
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          mkdir -p "$GITHUB_WORKSPACE/pkg"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+
+      - name: Download Bash
+        working-directory: src
+        run: |
+          set -euxo pipefail
+
+          wget "https://ftp.gnu.org/gnu/bash/bash-${VERSION}.tar.gz"
+          tar -xzf "bash-${VERSION}.tar.gz"
+
+      - name: Apply all stable Bash patches
+        working-directory: src
+        run: |
+          set -euxo pipefail
+
+          cd "bash-${VERSION}"
+
+          for n in $(seq -f "%03g" 1 "$PATCHLEVEL"); do
+            echo "Applying bash53-${n}"
+            wget -q \
+              "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-${n}" \
+              -O "../bash53-${n}"
+
+            patch -p0 < "../bash53-${n}"
+          done
+
+      - name: Configure Bash with full normal feature set
+        run: |
+          set -euxo pipefail
+
+          SOURCE="$GITHUB_WORKSPACE/src/bash-${VERSION}"
+          BUILD="$GITHUB_WORKSPACE/build/bash"
+
+          mkdir -p "$BUILD"
+          cd "$BUILD"
+
+          "$SOURCE/configure" \
+            --prefix=/usr \
+            --bindir=/usr/bin \
+            --with-curses \
+            --enable-alias \
+            --enable-arith-for-command \
+            --enable-array-variables \
+            --enable-assoc-array \
+            --enable-bang-history \
+            --enable-brace-expansion \
+            --enable-casemod-attributes \
+            --enable-casemod-expansions \
+            --enable-command-timing \
+            --enable-cond-command \
+            --enable-cond-regexp \
+            --enable-coprocesses \
+            --enable-debugger \
+            --enable-directory-stack \
+            --enable-disabled-builtins \
+            --enable-dparen-arithmetic \
+            --enable-extended-glob \
+            --enable-help-builtin \
+            --enable-history \
+            --enable-job-control \
+            --enable-multibyte \
+            --enable-net-redirections \
+            --enable-process-substitution \
+            --enable-progcomp \
+            --enable-prompt-string-decoding \
+            --enable-readline \
+            --enable-restricted \
+            --enable-select
+
+      - name: Build Bash
+        run: |
+          set -euxo pipefail
+          make -C "$GITHUB_WORKSPACE/build/bash" -j"$(nproc)"
+
+      - name: Verify Bash patch level
+        run: |
+          set -euxo pipefail
+          "$GITHUB_WORKSPACE/build/bash/bash" --version
+          "$GITHUB_WORKSPACE/build/bash/bash" -c 'printf "BASH_VERSION=%s\n" "$BASH_VERSION"'
+
+      - name: Stage Bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/pkg/bash"
+
+          make \
+            -C "$GITHUB_WORKSPACE/build/bash" \
+            DESTDIR="$ROOT" \
+            install
+
+          # Provide /bin/bash for software that expects the conventional path.
+          mkdir -p "$ROOT/bin"
+          ln -s ../usr/bin/bash "$ROOT/bin/bash"
+
+          # sh is intentionally Bash here for the base Mercury system.
+          ln -s bash "$ROOT/bin/sh"
+
+          find "$ROOT" -type f -o -type l | sort | head -200
+          du -sh "$ROOT"
+
+      - name: Package Bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/pkg/bash"
+          OUT="$GITHUB_WORKSPACE/dist/${PKGNAME}-${FULL_VERSION}-x86_64.tar.zst"
+
+          tar \
+            --use-compress-program="zstd -10 -T0" \
+            -C "$ROOT" \
+            -cf "$OUT" \
+            .
+
+          sha256sum "$OUT"
+          ls -lh "$OUT"
+
+      - name: Upload Bash artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: bash-5.3.15-x86_64
+          path: dist/bash-5.3.15-x86_64.tar.zst
+          compression-level: 0
+          retention-days: 7
