@@ -1,0 +1,162 @@
+name: Build util-linux 2.42.2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    env:
+      VERSION: "2.42.2"
+      SERIES: "2.42"
+      PKGNAME: "util-linux"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install full build dependencies
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            gettext \
+            autopoint \
+            bison \
+            flex \
+            asciidoctor \
+            python3 \
+            python3-dev \
+            cython3 \
+            libpython3-dev \
+            libncurses-dev \
+            libreadline-dev \
+            libpam0g-dev \
+            libsystemd-dev \
+            libudev-dev \
+            libselinux1-dev \
+            libaudit-dev \
+            libcap-ng-dev \
+            libcryptsetup-dev \
+            libsqlite3-dev \
+            libmagic-dev \
+            libutempter-dev \
+            libacl1-dev \
+            libattr1-dev \
+            zlib1g-dev \
+            wget \
+            tar \
+            xz-utils \
+            zstd
+
+      - name: Prepare directories
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/src"
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          mkdir -p "$GITHUB_WORKSPACE/pkg"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+
+      - name: Download util-linux
+        working-directory: src
+        run: |
+          set -euxo pipefail
+
+          wget \
+            "https://cdn.kernel.org/pub/linux/utils/util-linux/v${SERIES}/util-linux-${VERSION}.tar.xz"
+
+          tar -xf "util-linux-${VERSION}.tar.xz"
+
+      - name: Configure util-linux
+        run: |
+          set -euxo pipefail
+
+          SOURCE="$GITHUB_WORKSPACE/src/util-linux-${VERSION}"
+          BUILD="$GITHUB_WORKSPACE/build/util-linux"
+
+          mkdir -p "$BUILD"
+          cd "$BUILD"
+
+          "$SOURCE/configure" \
+            --prefix=/usr \
+            --bindir=/usr/bin \
+            --sbindir=/usr/sbin \
+            --libdir=/usr/lib \
+            --sysconfdir=/etc \
+            --localstatedir=/var \
+            --runstatedir=/run \
+            --enable-all-programs \
+            --enable-shared \
+            --enable-static \
+            --with-python \
+            --with-bashcompletiondir=/usr/share/bash-completion/completions \
+            --with-systemdsystemunitdir=/usr/lib/systemd/system \
+            --with-tmpfilesdir=/usr/lib/tmpfiles.d \
+            --with-sysusersdir=/usr/lib/sysusers.d \
+            --disable-makeinstall-chown \
+            --disable-use-tty-group
+
+      - name: Build util-linux
+        run: |
+          set -euxo pipefail
+          make -C "$GITHUB_WORKSPACE/build/util-linux" -j"$(nproc)"
+
+      - name: Stage util-linux
+        run: |
+          set -euxo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/pkg/util-linux"
+
+          make \
+            -C "$GITHUB_WORKSPACE/build/util-linux" \
+            DESTDIR="$ROOT" \
+            install
+
+          echo "=== Installed executables ==="
+          find "$ROOT/usr/bin" "$ROOT/usr/sbin" \
+            -maxdepth 1 -type f -printf '%p\n' 2>/dev/null | sort
+
+          echo
+          echo "=== Installed libraries ==="
+          find "$ROOT/usr/lib" \
+            -maxdepth 1 \( -type f -o -type l \) -printf '%p\n' 2>/dev/null | sort
+
+          echo
+          echo "=== Package size ==="
+          du -sh "$ROOT"
+
+      - name: Package util-linux
+        run: |
+          set -euxo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/pkg/util-linux"
+          OUT="$GITHUB_WORKSPACE/dist/${PKGNAME}-${VERSION}-x86_64.tar.zst"
+
+          tar \
+            --use-compress-program="zstd -10 -T0" \
+            -C "$ROOT" \
+            -cf "$OUT" \
+            .
+
+          sha256sum "$OUT" > "$OUT.sha256"
+
+          ls -lh "$OUT" "$OUT.sha256"
+          cat "$OUT.sha256"
+
+      - name: Upload util-linux artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: util-linux-2.42.2-x86_64
+          path: |
+            dist/util-linux-2.42.2-x86_64.tar.zst
+            dist/util-linux-2.42.2-x86_64.tar.zst.sha256
+          compression-level: 0
+          retention-days: 7
