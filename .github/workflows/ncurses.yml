@@ -91,7 +91,7 @@ jobs:
 
           # Preserve all installed libraries, utilities, headers, pkg-config
           # files, man pages and the terminfo database.
-          find "$ROOT" -type f -o -type l | sort | head -200
+          find "$ROOT" \( -type f -o -type l \) | sort | sed -n '1,200p'
           du -sh "$ROOT"
 
       - name: Package ncurses
