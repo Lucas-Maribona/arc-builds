@@ -210,7 +210,7 @@ jobs:
 
           ncurses)
             cd "$SRC"
-            wget "https://invisible-mirror.net/archives/ncurses/ncurses-${V}.tar.gz"
+            wget "https://ftp.gnu.org/gnu/ncurses/ncurses-${V}.tar.gz"
             tar -xzf "ncurses-${V}.tar.gz"
 
             mkdir -p "$BLD/ncurses"
