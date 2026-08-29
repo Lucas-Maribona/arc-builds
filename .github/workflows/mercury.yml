@@ -1,0 +1,753 @@
+name: Build Mercury strict-static base on Arch
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: mercury-static-${{ github.run_id }}
+
+jobs:
+  create-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Create prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Mercury strict-static build $GITHUB_RUN_ID" \
+            --notes "Arch Linux was used only as a build host. User-space ELF artifacts are rejected if they contain PT_INTERP or DT_NEEDED entries." \
+            --prerelease
+
+  build:
+    name: ${{ matrix.package }}
+    needs: create-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    container:
+      image: archlinux:latest
+
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        package:
+          - linux
+          - linux-firmware
+          - ncurses
+          - glibc
+          - bash
+          - coreutils
+          - util-linux
+          - procps-ng
+          - grep
+          - sed
+          - gawk
+          - findutils
+          - gzip
+          - tar
+          - xz
+          - zstd
+          - systemd-static-pid1
+          - limine
+
+    steps:
+      - name: Bootstrap Arch build host
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          pacman -Syu --noconfirm
+
+          pacman -S --noconfirm --needed \
+            base-devel \
+            binutils \
+            gcc \
+            file \
+            pkgconf \
+            autoconf \
+            automake \
+            gettext \
+            bison \
+            flex \
+            meson \
+            ninja \
+            cmake \
+            gperf \
+            bc \
+            cpio \
+            rsync \
+            kmod \
+            pahole \
+            nasm \
+            rdfind \
+            patch \
+            perl \
+            python \
+            python-jinja \
+            python-pyelftools \
+            asciidoc \
+            texinfo \
+            wget \
+            curl \
+            git \
+            tar \
+            gzip \
+            xz \
+            zstd \
+            github-cli \
+            openssl \
+            elfutils
+
+          mkdir -p \
+            "$GITHUB_WORKSPACE/src" \
+            "$GITHUB_WORKSPACE/build" \
+            "$GITHUB_WORKSPACE/pkg" \
+            "$GITHUB_WORKSPACE/dist"
+
+      - name: Select version
+        id: meta
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          case "${{ matrix.package }}" in
+            linux)               V="7.2.2";    N="linux" ;;
+            linux-firmware)      V="20260810"; N="linux-firmware" ;;
+            ncurses)             V="6.6";      N="ncurses" ;;
+            glibc)               V="2.44";     N="glibc" ;;
+            bash)                V="5.3.15";   N="bash" ;;
+            coreutils)           V="9.11";     N="coreutils" ;;
+            util-linux)          V="2.42.2";   N="util-linux" ;;
+            procps-ng)           V="4.0.7";    N="procps-ng" ;;
+            grep)                V="3.12";     N="grep" ;;
+            sed)                 V="4.10";     N="sed" ;;
+            gawk)                V="5.4.0";    N="gawk" ;;
+            findutils)           V="4.10.0";   N="findutils" ;;
+            gzip)                V="1.14";     N="gzip" ;;
+            tar)                 V="1.35";     N="tar" ;;
+            xz)                  V="5.8.3";    N="xz" ;;
+            zstd)                V="1.5.7";    N="zstd" ;;
+            systemd-static-pid1) V="261.2";    N="systemd-static-pid1" ;;
+            limine)              V="12.6.0";   N="limine" ;;
+            *) exit 1 ;;
+          esac
+
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "name=$N" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          P: ${{ matrix.package }}
+          V: ${{ steps.meta.outputs.version }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          SRC="$GITHUB_WORKSPACE/src"
+          BLD="$GITHUB_WORKSPACE/build"
+          ROOT="$GITHUB_WORKSPACE/pkg/$P"
+
+          mkdir -p "$ROOT"
+
+          export CFLAGS="-O2 -pipe"
+          export CXXFLAGS="-O2 -pipe"
+          export LDFLAGS="-static"
+
+          case "$P" in
+
+          linux)
+            cd "$SRC"
+            wget "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${V}.tar.xz"
+            tar -xf "linux-${V}.tar.xz"
+
+            S="$SRC/linux-${V}"
+            O="$BLD/linux"
+            mkdir -p "$O"
+
+            make -C "$S" O="$O" ARCH=x86_64 allmodconfig
+
+            "$S/scripts/config" \
+              --file "$O/.config" \
+              --set-str LOCALVERSION "-mercury" \
+              --disable DEBUG_INFO \
+              --enable DEBUG_INFO_NONE \
+              --disable WERROR
+
+            make -C "$S" O="$O" ARCH=x86_64 olddefconfig
+            make -C "$S" O="$O" ARCH=x86_64 -j"$(nproc)"
+
+            REL="$(make -s -C "$S" O="$O" ARCH=x86_64 kernelrelease)"
+
+            mkdir -p "$ROOT/boot"
+            install -Dm644 "$O/arch/x86/boot/bzImage" "$ROOT/boot/vmlinuz-$REL"
+            install -Dm644 "$O/System.map" "$ROOT/boot/System.map-$REL"
+            install -Dm644 "$O/.config" "$ROOT/boot/config-$REL"
+
+            make -C "$S" O="$O" ARCH=x86_64 \
+              INSTALL_MOD_PATH="$ROOT" \
+              modules_install
+
+            rm -f "$ROOT/lib/modules/$REL/build" "$ROOT/lib/modules/$REL/source"
+            ;;
+
+          linux-firmware)
+            cd "$SRC"
+            wget "https://cdn.kernel.org/pub/linux/kernel/firmware/linux-firmware-${V}.tar.xz"
+            tar -xf "linux-firmware-${V}.tar.xz"
+
+            make -C "$SRC/linux-firmware-${V}" DESTDIR="$ROOT" install
+            make -C "$SRC/linux-firmware-${V}" DESTDIR="$ROOT" dedup
+            ;;
+
+          ncurses)
+            cd "$SRC"
+            wget "https://invisible-mirror.net/archives/ncurses/ncurses-${V}.tar.gz"
+            tar -xzf "ncurses-${V}.tar.gz"
+
+            mkdir -p "$BLD/ncurses"
+            cd "$BLD/ncurses"
+
+            # No Arch ncurses is used. Build the static ncurses stack directly
+            # from upstream source.
+            "$SRC/ncurses-${V}/configure" \
+              --prefix=/usr \
+              --mandir=/usr/share/man \
+              --without-shared \
+              --with-normal \
+              --with-cxx \
+              --enable-widec \
+              --with-termlib \
+              --with-ticlib \
+              --enable-pc-files \
+              --with-pkg-config-libdir=/usr/lib/pkgconfig \
+              --enable-ext-colors \
+              --enable-ext-mouse \
+              --enable-sp-funcs \
+              --enable-sigwinch
+
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+            ;;
+
+          glibc)
+            # glibc itself is built from upstream source. This package contains
+            # headers, crt objects, utilities and static archives. It is not
+            # copied from Arch.
+            cd "$SRC"
+
+            wget "https://ftp.gnu.org/gnu/glibc/glibc-${V}.tar.xz"
+            tar -xf "glibc-${V}.tar.xz"
+
+            wget "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.2.tar.xz"
+            tar -xf linux-7.2.2.tar.xz
+
+            mkdir -p "$BLD/kernel-headers"
+
+            make -C "$SRC/linux-7.2.2" \
+              ARCH=x86_64 \
+              INSTALL_HDR_PATH="$BLD/kernel-headers" \
+              headers_install
+
+            mkdir -p "$BLD/glibc"
+            cd "$BLD/glibc"
+
+            unset LDFLAGS
+
+            "$SRC/glibc-${V}/configure" \
+              --prefix=/usr \
+              --with-headers="$BLD/kernel-headers/include" \
+              --enable-stack-protector=strong \
+              --enable-bind-now \
+              --enable-static-pie \
+              --enable-cet \
+              --enable-fortify-source=3 \
+              --disable-werror
+
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+            ;;
+
+          bash)
+            BASE="5.3"
+            PATCHLEVEL="15"
+
+            cd "$SRC"
+            wget "https://ftp.gnu.org/gnu/bash/bash-${BASE}.tar.gz"
+            tar -xzf "bash-${BASE}.tar.gz"
+            cd "$SRC/bash-${BASE}"
+
+            for n in $(seq -f "%03g" 1 "$PATCHLEVEL"); do
+              wget -q \
+                "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-${n}" \
+                -O "$SRC/bash53-${n}"
+              patch -p0 < "$SRC/bash53-${n}"
+            done
+
+            mkdir -p "$BLD/bash"
+            cd "$BLD/bash"
+
+            # Bash's bundled readline is used, avoiding Arch's readline.
+            "$SRC/bash-${BASE}/configure" \
+              --prefix=/usr \
+              --bindir=/usr/bin \
+              --without-bash-malloc \
+              --enable-alias \
+              --enable-arith-for-command \
+              --enable-array-variables \
+              --enable-assoc-array \
+              --enable-bang-history \
+              --enable-brace-expansion \
+              --enable-casemod-attributes \
+              --enable-casemod-expansions \
+              --enable-command-timing \
+              --enable-cond-command \
+              --enable-cond-regexp \
+              --enable-coprocesses \
+              --enable-debugger \
+              --enable-directory-stack \
+              --enable-disabled-builtins \
+              --enable-dparen-arithmetic \
+              --enable-extended-glob \
+              --enable-help-builtin \
+              --enable-history \
+              --enable-job-control \
+              --enable-multibyte \
+              --enable-net-redirections \
+              --enable-process-substitution \
+              --enable-progcomp \
+              --enable-prompt-string-decoding \
+              --enable-readline \
+              --enable-restricted \
+              --enable-select
+
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+
+            mkdir -p "$ROOT/bin"
+            ln -sf ../usr/bin/bash "$ROOT/bin/bash"
+            ln -sf bash "$ROOT/bin/sh"
+            ;;
+
+          coreutils)
+            cd "$SRC"
+            wget "https://ftp.gnu.org/gnu/coreutils/coreutils-${V}.tar.xz"
+            tar -xf "coreutils-${V}.tar.xz"
+
+            mkdir -p "$BLD/coreutils"
+            cd "$BLD/coreutils"
+
+            # External SELinux/ACL runtime integrations are intentionally not
+            # linked because strict-static closure is the higher requirement.
+            FORCE_UNSAFE_CONFIGURE=1 \
+              "$SRC/coreutils-${V}/configure" \
+              --prefix=/usr \
+              --enable-install-program=hostname \
+              --without-selinux
+
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+            ;;
+
+          util-linux)
+            SERIES="${V%.*}"
+
+            cd "$SRC"
+            wget "https://cdn.kernel.org/pub/linux/utils/util-linux/v${SERIES}/util-linux-${V}.tar.xz"
+            tar -xf "util-linux-${V}.tar.xz"
+
+            mkdir -p "$BLD/util-linux"
+            cd "$BLD/util-linux"
+
+            # Build every util-linux program that does not force a dynamic
+            # plugin/PAM/systemd dependency. Shared libraries and Python
+            # bindings are excluded from the strict-static profile.
+            "$SRC/util-linux-${V}/configure" \
+              --prefix=/usr \
+              --bindir=/usr/bin \
+              --sbindir=/usr/sbin \
+              --libdir=/usr/lib \
+              --sysconfdir=/etc \
+              --localstatedir=/var \
+              --runstatedir=/run \
+              --enable-all-programs \
+              --disable-shared \
+              --enable-static \
+              --without-python \
+              --without-systemd \
+              --without-udev \
+              --disable-makeinstall-chown \
+              --disable-use-tty-group
+
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+            ;;
+
+          procps-ng)
+            # Build a private static ncurses for procps-ng so top/watch do not
+            # depend on Arch's libncurses/libtinfo.
+            cd "$SRC"
+
+            wget "https://invisible-mirror.net/archives/ncurses/ncurses-6.6.tar.gz"
+            tar -xzf ncurses-6.6.tar.gz
+
+            mkdir -p "$BLD/procps-ncurses"
+
+            (
+              cd "$BLD/procps-ncurses"
+              LDFLAGS="" "$SRC/ncurses-6.6/configure" \
+                --prefix="$BLD/procps-prefix" \
+                --without-shared \
+                --with-normal \
+                --enable-widec \
+                --with-termlib
+              make -j"$(nproc)"
+              make install
+            )
+
+            wget -O "procps-ng-${V}.tar.xz" \
+              "https://downloads.sourceforge.net/project/procps-ng/Production/procps-ng-${V}.tar.xz"
+
+            tar -xf "procps-ng-${V}.tar.xz"
+
+            mkdir -p "$BLD/procps-ng"
+            cd "$BLD/procps-ng"
+
+            export CPPFLAGS="-I$BLD/procps-prefix/include -I$BLD/procps-prefix/include/ncursesw"
+            export LIBS="-L$BLD/procps-prefix/lib -lncursesw -ltinfo"
+
+            "$SRC/procps-ng-${V}/configure" \
+              --prefix=/usr \
+              --disable-shared \
+              --enable-static \
+              --enable-watch8bit \
+              --without-systemd
+
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+            ;;
+
+          grep)
+            # -P requires PCRE2. Build PCRE2 from source as a private static
+            # dependency instead of using the Arch package.
+            cd "$SRC"
+
+            PCRE2_VERSION="10.46"
+
+            wget \
+              "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/pcre2-${PCRE2_VERSION}.tar.bz2"
+
+            tar -xjf "pcre2-${PCRE2_VERSION}.tar.bz2"
+
+            mkdir -p "$BLD/pcre2"
+
+            (
+              cd "$BLD/pcre2"
+              LDFLAGS="" "$SRC/pcre2-${PCRE2_VERSION}/configure" \
+                --prefix="$BLD/pcre2-prefix" \
+                --disable-shared \
+                --enable-static \
+                --enable-pcre2-8 \
+                --enable-pcre2-16 \
+                --enable-pcre2-32 \
+                --enable-unicode \
+                --enable-jit
+              make -j"$(nproc)"
+              make install
+            )
+
+            wget "https://ftp.gnu.org/gnu/grep/grep-${V}.tar.xz"
+            tar -xf "grep-${V}.tar.xz"
+
+            mkdir -p "$BLD/grep"
+            cd "$BLD/grep"
+
+            export CPPFLAGS="-I$BLD/pcre2-prefix/include"
+            export LIBS="-L$BLD/pcre2-prefix/lib -lpcre2-8"
+
+            "$SRC/grep-${V}/configure" \
+              --prefix=/usr \
+              --without-selinux
+
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+            ;;
+
+          sed)
+            cd "$SRC"
+            wget "https://ftp.gnu.org/gnu/sed/sed-${V}.tar.xz"
+            tar -xf "sed-${V}.tar.xz"
+
+            mkdir -p "$BLD/sed"
+            cd "$BLD/sed"
+
+            "$SRC/sed-${V}/configure" \
+              --prefix=/usr \
+              --without-selinux
+
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+            ;;
+
+          gawk)
+            cd "$SRC"
+            wget "https://ftp.gnu.org/gnu/gawk/gawk-${V}.tar.xz"
+            tar -xf "gawk-${V}.tar.xz"
+
+            mkdir -p "$BLD/gawk"
+            cd "$BLD/gawk"
+
+            # Loadable extension .so files contradict the zero-DT_NEEDED
+            # guarantee, so strict-static Gawk disables extension modules.
+            "$SRC/gawk-${V}/configure" \
+              --prefix=/usr \
+              --disable-extensions
+
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+            ;;
+
+          findutils)
+            cd "$SRC"
+            wget "https://ftp.gnu.org/gnu/findutils/findutils-${V}.tar.xz"
+            tar -xf "findutils-${V}.tar.xz"
+
+            mkdir -p "$BLD/findutils"
+            cd "$BLD/findutils"
+
+            "$SRC/findutils-${V}/configure" --prefix=/usr
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+            ;;
+
+          gzip)
+            cd "$SRC"
+            wget "https://ftp.gnu.org/gnu/gzip/gzip-${V}.tar.xz"
+            tar -xf "gzip-${V}.tar.xz"
+
+            mkdir -p "$BLD/gzip"
+            cd "$BLD/gzip"
+
+            "$SRC/gzip-${V}/configure" --prefix=/usr
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+            ;;
+
+          tar)
+            cd "$SRC"
+            wget "https://ftp.gnu.org/gnu/tar/tar-${V}.tar.xz"
+            tar -xf "tar-${V}.tar.xz"
+
+            mkdir -p "$BLD/tar"
+            cd "$BLD/tar"
+
+            FORCE_UNSAFE_CONFIGURE=1 \
+              "$SRC/tar-${V}/configure" \
+              --prefix=/usr \
+              --without-selinux
+
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+            ;;
+
+          xz)
+            cd "$SRC"
+            wget "https://github.com/tukaani-project/xz/releases/download/v${V}/xz-${V}.tar.xz"
+            tar -xf "xz-${V}.tar.xz"
+
+            mkdir -p "$BLD/xz"
+            cd "$BLD/xz"
+
+            "$SRC/xz-${V}/configure" \
+              --prefix=/usr \
+              --disable-shared \
+              --enable-static \
+              --enable-threads=yes
+
+            make -j"$(nproc)"
+            make DESTDIR="$ROOT" install
+            ;;
+
+          zstd)
+            cd "$SRC"
+            wget "https://github.com/facebook/zstd/releases/download/v${V}/zstd-${V}.tar.gz"
+            tar -xzf "zstd-${V}.tar.gz"
+
+            cd "$SRC/zstd-${V}"
+
+            make -j"$(nproc)" \
+              BUILD_SHARED=0 \
+              BUILD_STATIC=1 \
+              LDFLAGS="-static"
+
+            make \
+              PREFIX=/usr \
+              DESTDIR="$ROOT" \
+              BUILD_SHARED=0 \
+              BUILD_STATIC=1 \
+              install
+            ;;
+
+          systemd-static-pid1)
+            # Full systemd is intentionally excluded: its plugin/NSS/module
+            # architecture is not compatible with "truly static". Upstream's
+            # static PID1/multicall mode is used instead.
+            cd "$SRC"
+
+            git clone \
+              --depth 1 \
+              --branch "v${V}" \
+              https://github.com/systemd/systemd.git \
+              "systemd-${V}"
+
+            # Install the Arch *development* packages only to compile systemd.
+            # The strict ELF verification below rejects any resulting dynamic
+            # dependency, so none can leak into the artifact.
+            pacman -S --noconfirm --needed \
+              libcap \
+              util-linux-libs \
+              libseccomp \
+              libxcrypt
+
+            meson setup \
+              "$BLD/systemd" \
+              "$SRC/systemd-${V}" \
+              --prefix=/usr \
+              --buildtype=release \
+              --default-library=static \
+              --prefer-static \
+              -Dbuild-static=true \
+              -Dsystemd-multicall-binary=true \
+              -Dstatic-libsystemd=true \
+              -Dstatic-libudev=true \
+              -Dstandalone-binaries=systemctl,udevadm,tmpfiles,sysusers \
+              -Dtests=false \
+              -Dman=false \
+              -Dhtml=false \
+              -Dtranslations=false \
+              -Dselinux=false \
+              -Dapparmor=false \
+              -Dseccomp=false \
+              -Dpam=false \
+              -Daudit=false \
+              -Dlibcryptsetup=false \
+              -Dlibcurl=false \
+              -Dlibfido2=false \
+              -Dlibidn=false \
+              -Dlibarchive=false \
+              -Dopenssl=false \
+              -Dp11kit=false \
+              -Dqrencode=false \
+              -Dtpm2=false \
+              -Dxz=false \
+              -Dzstd=false \
+              -Dlz4=false \
+              -Dbzip2=false
+
+            ninja -C "$BLD/systemd" -j"$(nproc)"
+            DESTDIR="$ROOT" ninja -C "$BLD/systemd" install
+            ;;
+
+          limine)
+            cd "$SRC"
+            wget "https://github.com/limine-bootloader/limine/releases/download/v${V}/limine-${V}.tar.xz"
+            tar -xf "limine-${V}.tar.xz"
+
+            cd "$SRC/limine-${V}"
+
+            ./configure --prefix=/usr
+
+            make -j"$(nproc)" \
+              CFLAGS="-O2 -static" \
+              LDFLAGS="-static"
+
+            make DESTDIR="$ROOT" install
+            ;;
+
+          *)
+            exit 1
+            ;;
+          esac
+
+      - name: Prove user-space ELFs are static
+        if: ${{ matrix.package != 'linux' && matrix.package != 'linux-firmware' && matrix.package != 'glibc' }}
+        env:
+          P: ${{ matrix.package }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/pkg/$P"
+          FAIL=0
+          ELFS=0
+
+          while IFS= read -r -d '' f; do
+            if file -b "$f" | grep -q '^ELF '; then
+              ELFS=$((ELFS + 1))
+              echo "Checking $f"
+
+              if readelf -l "$f" 2>/dev/null | grep -q 'INTERP'; then
+                echo "::error file=$f::PT_INTERP found; this ELF is dynamically loaded"
+                FAIL=1
+              fi
+
+              if readelf -d "$f" 2>/dev/null | grep -q '(NEEDED)'; then
+                echo "::error file=$f::DT_NEEDED found"
+                readelf -d "$f" | grep '(NEEDED)' || true
+                FAIL=1
+              fi
+            fi
+          done < <(find "$ROOT" -type f -print0)
+
+          echo "Checked $ELFS ELF files."
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo "Strict-static verification failed." >&2
+            exit 1
+          fi
+
+      - name: Package
+        env:
+          P: ${{ matrix.package }}
+          V: ${{ steps.meta.outputs.version }}
+          N: ${{ steps.meta.outputs.name }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$GITHUB_WORKSPACE/pkg/$P"
+          OUT="$GITHUB_WORKSPACE/dist/${N}-${V}-x86_64.tar.zst"
+
+          tar \
+            --use-compress-program="zstd -10 -T0" \
+            -C "$ROOT" \
+            -cf "$OUT" \
+            .
+
+          sha256sum "$OUT" > "$OUT.sha256"
+
+          ls -lh "$OUT" "$OUT.sha256"
+          cat "$OUT.sha256"
+
+      - name: Upload separate release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          N: ${{ steps.meta.outputs.name }}
+          V: ${{ steps.meta.outputs.version }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          gh release upload "$RELEASE_TAG" \
+            "dist/${N}-${V}-x86_64.tar.zst" \
+            "dist/${N}-${V}-x86_64.tar.zst.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
