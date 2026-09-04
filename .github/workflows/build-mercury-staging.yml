@@ -419,14 +419,14 @@ jobs:
             --sysconfdir=/etc \
             --localstatedir=/var \
             --buildtype=release \
+            -Dmode=release \
             -Dtests=false \
             -Dslow-tests=false \
             -Dfuzz-tests=false \
             -Dinstall-tests=false \
-            -Ddlopen-tests=false \
             -Dglib=disabled \
             -Ddbus=disabled \
-            -Dman=false \
+            -Dman=disabled \
             -Dbpf-framework=disabled
           
           ninja -C build
