@@ -405,22 +405,22 @@ jobs:
             libssl-dev \
             liblzma-dev \
             libzstd-dev
-
           cd "$SRC"
-
+          
           git clone --depth 1 --branch "v${VERSION}" \
             https://github.com/systemd/systemd.git
-
+          
           cd systemd
-
+          
           meson setup build \
             --prefix=/usr \
             --sysconfdir=/etc \
             --localstatedir=/var \
             --buildtype=release \
             -Dtests=false \
-            -Dman=false
-
+            -Dman=false \
+            -Dbpf-framework=disabled
+          
           ninja -C build
           DESTDIR="$STAGE" ninja -C build install
 
