@@ -383,6 +383,7 @@ jobs:
             meson \
             ninja-build \
             python3-jinja2 \
+            python3-pefile \
             libacl1-dev \
             libapparmor-dev \
             libaudit-dev \
@@ -405,6 +406,7 @@ jobs:
             libssl-dev \
             liblzma-dev \
             libzstd-dev
+  
           cd "$SRC"
           
           git clone --depth 1 --branch "v${VERSION}" \
