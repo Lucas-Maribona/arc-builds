@@ -429,7 +429,46 @@ jobs:
             -Dman=disabled \
             -Dbpf-framework=disabled
           
-          DESTDIR="$STAGE" ninja -C build install
+          # Build only outputs that Meson says are actually installed.
+          python3 <<'PY' > "$RUNNER_TEMP/systemd-install-targets.txt"
+          import json
+          from pathlib import Path
+          
+          build = Path("build").resolve()
+          
+          with open(build / "meson-info" / "intro-installed.json") as f:
+              installed = json.load(f)
+          
+          targets = set()
+          
+          for src in installed:
+              src = Path(src)
+          
+              try:
+                  rel = src.relative_to(build)
+              except ValueError:
+                  # Static source/data file; it doesn't need compiling.
+                  continue
+          
+              targets.add(str(rel))
+          
+          for target in sorted(targets):
+              print(target)
+          PY
+          
+          mapfile -t INSTALL_TARGETS < "$RUNNER_TEMP/systemd-install-targets.txt"
+          
+          echo "Building ${#INSTALL_TARGETS[@]} installable systemd outputs"
+          
+          if [ "${#INSTALL_TARGETS[@]}" -eq 0 ]; then
+            echo "No installable build targets discovered" >&2
+            exit 1
+          fi
+          
+          ninja -C build "${INSTALL_TARGETS[@]}"
+          
+          # Crucial: do NOT let Meson invoke Ninja again.
+          DESTDIR="$STAGE" meson install -C build --no-rebuild
 
       # --------------------------------------------------------------------
       # Mercury base-devel bundle
