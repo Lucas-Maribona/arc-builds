@@ -1,0 +1,107 @@
+name: Build Mercury Linux Base
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: linux
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            build-essential bc bison flex \
+            libssl-dev libelf-dev \
+            libncurses-dev dwarves \
+            cpio rsync wget xz-utils
+
+      - name: Download Linux 7.2.3
+        run: |
+          wget https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.3.tar.xz
+          tar -xf linux-7.2.3.tar.xz
+          mv linux-7.2.3 linux
+
+      - name: Configure
+        working-directory: linux
+        run: |
+          make defconfig
+          scripts/config --set-str LOCALVERSION "-mcx"
+          scripts/config --disable LOCALVERSION_AUTO
+          make olddefconfig
+
+      - name: Build kernel
+        working-directory: linux
+        run: |
+          make -j"$(nproc)"
+
+      - name: Build modules
+        working-directory: linux
+        run: |
+          make -j"$(nproc)" modules
+
+      - name: Package kernel
+        run: |
+          VERSION="$(make -s -C linux kernelrelease)"
+
+          mkdir -p package/boot
+          mkdir -p package/usr/lib/modules
+
+          cp linux/arch/x86/boot/bzImage \
+            "package/boot/vmlinuz-${VERSION}"
+
+          cp linux/System.map \
+            "package/boot/System.map-${VERSION}"
+
+          cp linux/.config \
+            "package/boot/config-${VERSION}"
+
+          sudo make -C linux \
+            INSTALL_MOD_PATH="$PWD/package" \
+            modules_install
+
+          tar -C package \
+            -cJf "linux-${VERSION}-x86_64.tar.xz" .
+
+      - name: Upload linux
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-7.2.3-mcx
+          path: linux-7.2.3-mcx-x86_64.tar.xz
+
+
+  linux-firmware:
+    name: linux-firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download linux-firmware
+        run: |
+          wget \
+            https://cdn.kernel.org/pub/linux/kernel/firmware/linux-firmware-20260810.tar.xz
+
+          tar -xf linux-firmware-20260810.tar.xz
+
+      - name: Package firmware
+        run: |
+          mkdir -p package/usr/lib/firmware
+
+          cp -a \
+            linux-firmware-20260810/. \
+            package/usr/lib/firmware/
+
+          # Remove source/repository metadata we don't need
+          rm -rf \
+            package/usr/lib/firmware/.git \
+            package/usr/lib/firmware/.github
+
+          tar -C package \
+            -cJf linux-firmware-20260810-any.tar.xz .
+
+      - name: Upload linux-firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-firmware-20260810
+          path: linux-firmware-20260810-any.tar.xz
