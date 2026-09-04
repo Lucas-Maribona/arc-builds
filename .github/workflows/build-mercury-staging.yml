@@ -1,0 +1,713 @@
+name: Build Mercury Package Staging Archives
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ARCH: x86_64
+
+jobs:
+  build:
+    name: Build ${{ matrix.package }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: linux
+            version: "7.2.3"
+          - package: linux-firmware
+            version: "20260810"
+          - package: systemd
+            version: "261.2"
+          - package: micro
+            version: "2.0.15"
+          - package: tree
+            version: "2.3.2"
+          - package: zsh
+            version: "5.9.2"
+          - package: git
+            version: "2.55.0"
+          - package: iwd
+            version: "3.12"
+          - package: base-devel
+            version: "mercury-1"
+
+    steps:
+      - name: Install common build/packaging tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            git \
+            musl-tools \
+            patchelf \
+            pax-utils \
+            pkg-config \
+            python3 \
+            tar \
+            xz-utils
+
+      - name: Prepare directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/src" "$RUNNER_TEMP/stage" "$RUNNER_TEMP/out"
+          echo "SRC=$RUNNER_TEMP/src" >> "$GITHUB_ENV"
+          echo "STAGE=$RUNNER_TEMP/stage" >> "$GITHUB_ENV"
+          echo "OUT=$RUNNER_TEMP/out" >> "$GITHUB_ENV"
+          echo "PACKAGE=${{ matrix.package }}" >> "$GITHUB_ENV"
+          echo "VERSION=${{ matrix.version }}" >> "$GITHUB_ENV"
+
+      # --------------------------------------------------------------------
+      # Linux 7.2.3-mcx
+      # --------------------------------------------------------------------
+      - name: Build Linux
+        if: matrix.package == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get install -y --no-install-recommends \
+            bc \
+            bison \
+            flex \
+            libelf-dev \
+            libssl-dev \
+            dwarves \
+            cpio \
+            rsync
+
+          cd "$SRC"
+          curl -fL --retry 3 \
+            "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${VERSION}.tar.xz" \
+            -o "linux-${VERSION}.tar.xz"
+
+          tar -xf "linux-${VERSION}.tar.xz"
+          cd "linux-${VERSION}"
+
+          make defconfig
+
+          scripts/config --set-str LOCALVERSION "-mcx"
+          scripts/config --disable LOCALVERSION_AUTO
+          make olddefconfig
+
+          make -j"$(nproc)"
+
+          KREL="$(make -s kernelrelease)"
+          test "$KREL" = "${VERSION}-mcx"
+
+          mkdir -p "$STAGE/boot"
+
+          install -m755 arch/x86/boot/bzImage \
+            "$STAGE/boot/vmlinuz-${KREL}"
+          install -m644 System.map \
+            "$STAGE/boot/System.map-${KREL}"
+          install -m644 .config \
+            "$STAGE/boot/config-${KREL}"
+
+          make INSTALL_MOD_PATH="$STAGE" modules_install
+
+          test -d "$STAGE/usr/lib/modules/$KREL" || \
+            test -d "$STAGE/lib/modules/$KREL"
+
+          # Normalize modules to /usr/lib/modules.
+          if [ -d "$STAGE/lib/modules/$KREL" ] && \
+             [ ! -d "$STAGE/usr/lib/modules/$KREL" ]; then
+            mkdir -p "$STAGE/usr/lib/modules"
+            mv "$STAGE/lib/modules/$KREL" "$STAGE/usr/lib/modules/"
+            rmdir "$STAGE/lib/modules" 2>/dev/null || true
+            rmdir "$STAGE/lib" 2>/dev/null || true
+          fi
+
+          echo "$KREL" > "$RUNNER_TEMP/kernel-release"
+
+      # --------------------------------------------------------------------
+      # linux-firmware 20260810
+      # --------------------------------------------------------------------
+      - name: Stage linux-firmware
+        if: matrix.package == 'linux-firmware'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$SRC"
+          curl -fL --retry 3 \
+            "https://www.kernel.org/pub/linux/kernel/firmware/linux-firmware-${VERSION}.tar.xz" \
+            -o "linux-firmware-${VERSION}.tar.xz"
+
+          mkdir unpack
+          tar -xf "linux-firmware-${VERSION}.tar.xz" -C unpack --strip-components=1
+
+          mkdir -p "$STAGE/usr/lib/firmware"
+          cp -a unpack/. "$STAGE/usr/lib/firmware/"
+
+          # Remove source-control/build-only files if present.
+          rm -rf \
+            "$STAGE/usr/lib/firmware/.git" \
+            "$STAGE/usr/lib/firmware/.github"
+
+      # --------------------------------------------------------------------
+      # micro 2.0.15 - fully static Go build
+      # --------------------------------------------------------------------
+      - name: Build micro
+        if: matrix.package == 'micro'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get install -y --no-install-recommends golang-go
+
+          cd "$SRC"
+          git clone --depth 1 --branch "v${VERSION}" \
+            https://github.com/micro-editor/micro.git
+
+          cd micro
+
+          mkdir -p "$STAGE/usr/bin"
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build \
+              -trimpath \
+              -ldflags="-s -w" \
+              -o "$STAGE/usr/bin/micro" \
+              ./cmd/micro
+
+          file "$STAGE/usr/bin/micro"
+          if ldd "$STAGE/usr/bin/micro" 2>&1 | grep -q "not a dynamic executable"; then
+            echo "micro is fully static"
+          fi
+
+      # --------------------------------------------------------------------
+      # tree 2.3.2 - fully static musl build
+      # --------------------------------------------------------------------
+      - name: Build tree
+        if: matrix.package == 'tree'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$SRC"
+          git clone --depth 1 --branch "${VERSION}" \
+            https://gitlab.com/OldManProgrammer/unix-tree.git tree
+
+          cd tree
+
+          make clean || true
+          make \
+            CC=musl-gcc \
+            CFLAGS="-O2 -pipe" \
+            LDFLAGS="-static"
+
+          mkdir -p "$STAGE/usr/bin"
+          install -m755 tree "$STAGE/usr/bin/tree"
+
+          file "$STAGE/usr/bin/tree"
+
+      # --------------------------------------------------------------------
+      # zsh 5.9.2
+      # Keep normal useful zsh functionality and bundle ELF dependencies.
+      # --------------------------------------------------------------------
+      - name: Build zsh
+        if: matrix.package == 'zsh'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get install -y --no-install-recommends \
+            autoconf \
+            libncurses-dev \
+            libpcre2-dev
+
+          cd "$SRC"
+
+          curl -fL --retry 3 \
+            "https://www.zsh.org/pub/zsh-${VERSION}.tar.xz" \
+            -o "zsh-${VERSION}.tar.xz"
+
+          tar -xf "zsh-${VERSION}.tar.xz"
+          cd "zsh-${VERSION}"
+
+          ./configure \
+            --prefix=/usr \
+            --enable-multibyte
+
+          make -j"$(nproc)"
+          make DESTDIR="$STAGE" install
+
+          # zsh/ncurses expects terminfo at runtime.
+          if [ -d /usr/share/terminfo ]; then
+            mkdir -p "$STAGE/usr/share/terminfo"
+            cp -a /usr/share/terminfo/. "$STAGE/usr/share/terminfo/"
+          fi
+
+      # --------------------------------------------------------------------
+      # Git 2.55.0
+      #
+      # Core Git + HTTPS. Perl/Tcl/Python optional integrations are disabled
+      # intentionally so the package does not need to contain entire language
+      # runtimes merely for peripheral commands.
+      # --------------------------------------------------------------------
+      - name: Build Git
+        if: matrix.package == 'git'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get install -y --no-install-recommends \
+            gettext \
+            libcurl4-openssl-dev \
+            libexpat1-dev \
+            libpcre2-dev \
+            libssl-dev \
+            zlib1g-dev
+
+          cd "$SRC"
+
+          curl -fL --retry 3 \
+            "https://www.kernel.org/pub/software/scm/git/git-${VERSION}.tar.xz" \
+            -o "git-${VERSION}.tar.xz"
+
+          tar -xf "git-${VERSION}.tar.xz"
+          cd "git-${VERSION}"
+
+          make configure
+
+          ./configure \
+            --prefix=/usr \
+            --with-curl \
+            --with-openssl
+
+          make -j"$(nproc)" \
+            NO_TCLTK=YesPlease \
+            NO_PERL=YesPlease \
+            NO_PYTHON=YesPlease
+
+          make DESTDIR="$STAGE" install \
+            NO_TCLTK=YesPlease \
+            NO_PERL=YesPlease \
+            NO_PYTHON=YesPlease
+
+          # HTTPS needs a CA trust store. Keep it in this package artifact.
+          mkdir -p "$STAGE/etc/ssl/certs"
+          cp -a /etc/ssl/certs/. "$STAGE/etc/ssl/certs/"
+          if [ -f /etc/ssl/cert.pem ]; then
+            cp -a /etc/ssl/cert.pem "$STAGE/etc/ssl/cert.pem"
+          fi
+
+      # --------------------------------------------------------------------
+      # iwd 3.12 + ELL 0.83
+      # ELL is built as part of THIS job and bundled with iwd.
+      # --------------------------------------------------------------------
+      - name: Build iwd
+        if: matrix.package == 'iwd'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ELL_VERSION="0.83"
+
+          sudo apt-get install -y --no-install-recommends \
+            autoconf \
+            automake \
+            libtool \
+            libdbus-1-dev \
+            libreadline-dev \
+            linux-libc-dev
+
+          cd "$SRC"
+
+          curl -fL --retry 3 \
+            "https://www.kernel.org/pub/linux/libs/ell/ell-${ELL_VERSION}.tar.xz" \
+            -o "ell-${ELL_VERSION}.tar.xz"
+
+          tar -xf "ell-${ELL_VERSION}.tar.xz"
+          cd "ell-${ELL_VERSION}"
+
+          ./configure \
+            --prefix="$RUNNER_TEMP/ell" \
+            --enable-shared \
+            --enable-static
+
+          make -j"$(nproc)"
+          make install
+
+          cd "$SRC"
+
+          curl -fL --retry 3 \
+            "https://www.kernel.org/pub/linux/network/wireless/iwd-${VERSION}.tar.xz" \
+            -o "iwd-${VERSION}.tar.xz"
+
+          tar -xf "iwd-${VERSION}.tar.xz"
+          cd "iwd-${VERSION}"
+
+          PKG_CONFIG_PATH="$RUNNER_TEMP/ell/lib/pkgconfig" \
+            ./configure \
+              --prefix=/usr \
+              --sysconfdir=/etc \
+              --localstatedir=/var \
+              --enable-external-ell \
+              --enable-tools
+
+          make -j"$(nproc)"
+          make DESTDIR="$STAGE" install
+
+          # Tell the later bundler where libell lives on the build host.
+          echo "EXTRA_LIB_DIRS=$RUNNER_TEMP/ell/lib" >> "$GITHUB_ENV"
+
+      # --------------------------------------------------------------------
+      # systemd 261.2
+      #
+      # systemd is intentionally not forced into an unrealistic fully-static
+      # build. Its ELF runtime closure is bundled privately after installation.
+      # --------------------------------------------------------------------
+      - name: Build systemd
+        if: matrix.package == 'systemd'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get install -y --no-install-recommends \
+            gettext \
+            gperf \
+            meson \
+            ninja-build \
+            python3-jinja2 \
+            libacl1-dev \
+            libapparmor-dev \
+            libaudit-dev \
+            libblkid-dev \
+            libbpf-dev \
+            libcap-dev \
+            libcryptsetup-dev \
+            libcurl4-openssl-dev \
+            libdw-dev \
+            libelf-dev \
+            libfdisk-dev \
+            libfido2-dev \
+            libkmod-dev \
+            liblz4-dev \
+            libmount-dev \
+            libpam0g-dev \
+            libpcre2-dev \
+            libseccomp-dev \
+            libselinux1-dev \
+            libssl-dev \
+            libxz-dev \
+            libzstd-dev
+
+          cd "$SRC"
+
+          git clone --depth 1 --branch "v${VERSION}" \
+            https://github.com/systemd/systemd.git
+
+          cd systemd
+
+          meson setup build \
+            --prefix=/usr \
+            --sysconfdir=/etc \
+            --localstatedir=/var \
+            --buildtype=release \
+            -Dtests=false \
+            -Dman=false
+
+          ninja -C build
+          DESTDIR="$STAGE" ninja -C build install
+
+      # --------------------------------------------------------------------
+      # Mercury base-devel bundle
+      #
+      # There is no single "latest upstream base-devel": this is a Mercury
+      # bundle of the Ubuntu 24.04 stable build toolchain.
+      # --------------------------------------------------------------------
+      - name: Stage base-devel
+        if: matrix.package == 'base-devel'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get install -y --no-install-recommends \
+            apt-rdepends \
+            autoconf \
+            automake \
+            binutils \
+            bison \
+            build-essential \
+            cmake \
+            fakeroot \
+            file \
+            flex \
+            g++ \
+            gcc \
+            libc6-dev \
+            libtool \
+            linux-libc-dev \
+            m4 \
+            make \
+            meson \
+            ninja-build \
+            patch \
+            pkg-config \
+            python3 \
+            sed \
+            tar \
+            xz-utils \
+            zstd
+
+          # Copy files owned by the explicitly selected development packages
+          # and their package dependencies. This avoids copying the whole runner.
+          ROOT_PACKAGES=(
+            autoconf automake binutils bison build-essential cmake fakeroot file
+            flex g++ gcc libc6-dev libtool linux-libc-dev m4 make meson
+            ninja-build patch pkg-config python3 sed tar xz-utils zstd
+          )
+
+          mapfile -t PACKAGES < <(
+            apt-rdepends "${ROOT_PACKAGES[@]}" 2>/dev/null |
+              sed -n 's/^[[:alnum:]][[:alnum:].+:-]*$/&/p' |
+              sort -u
+          )
+
+          for pkg in "${PACKAGES[@]}"; do
+            dpkg-query -W "$pkg" >/dev/null 2>&1 || continue
+
+            while IFS= read -r path; do
+              [ -e "$path" ] || [ -L "$path" ] || continue
+              [ "$path" = "/." ] && continue
+
+              dest="$STAGE$path"
+
+              if [ -d "$path" ] && [ ! -L "$path" ]; then
+                mkdir -p "$dest"
+              elif [ -L "$path" ]; then
+                mkdir -p "$(dirname "$dest")"
+                cp -a "$path" "$dest"
+              elif [ -f "$path" ]; then
+                mkdir -p "$(dirname "$dest")"
+                cp -a "$path" "$dest"
+              fi
+            done < <(dpkg -L "$pkg")
+          done
+
+      # --------------------------------------------------------------------
+      # Generic private ELF runtime bundling
+      #
+      # For dynamic packages:
+      #   /usr/lib/arc/<package>/
+      #
+      # Copies the complete lddtree closure and patches staged ELF files so
+      # they look for libraries there.
+      # --------------------------------------------------------------------
+      - name: Bundle private ELF runtime
+        if: >
+          matrix.package != 'linux' &&
+          matrix.package != 'linux-firmware' &&
+          matrix.package != 'micro' &&
+          matrix.package != 'tree'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PRIVATE="$STAGE/usr/lib/arc/$PACKAGE"
+          mkdir -p "$PRIVATE"
+
+          # Include directories containing libraries already installed into the
+          # staged tree, e.g. systemd's private shared objects.
+          STAGE_LIB_DIRS="$(
+            find "$STAGE" \( -type f -o -type l \) -name '*.so*' -printf '%h\n' \
+              2>/dev/null | sort -u | paste -sd: -
+          )"
+
+          SEARCH_PATH="${EXTRA_LIB_DIRS:-}"
+          if [ -n "$STAGE_LIB_DIRS" ]; then
+            if [ -n "$SEARCH_PATH" ]; then
+              SEARCH_PATH="${SEARCH_PATH}:${STAGE_LIB_DIRS}"
+            else
+              SEARCH_PATH="$STAGE_LIB_DIRS"
+            fi
+          fi
+
+          copy_runtime_file() {
+            local source="$1"
+            [ -e "$source" ] || return 0
+
+            local name
+            name="$(basename "$source")"
+
+            # A basename collision inside one private runtime is dangerous.
+            if [ -e "$PRIVATE/$name" ]; then
+              local old new
+              old="$(sha256sum "$PRIVATE/$name" | awk '{print $1}')"
+              new="$(sha256sum "$source" | awk '{print $1}')"
+              if [ "$old" != "$new" ]; then
+                echo "runtime basename collision: $name" >&2
+                exit 1
+              fi
+              return 0
+            fi
+
+            cp -L "$source" "$PRIVATE/$name"
+            chmod --reference="$source" "$PRIVATE/$name" || true
+          }
+
+          # Enumerate the runtime closure before patching ELF interpreter paths.
+          while IFS= read -r -d '' f; do
+            file "$f" | grep -q 'ELF' || continue
+
+            if [ -n "$SEARCH_PATH" ]; then
+              mapfile -t libs < <(
+                LD_LIBRARY_PATH="$SEARCH_PATH" lddtree -l "$f" 2>/dev/null || true
+              )
+            else
+              mapfile -t libs < <(
+                lddtree -l "$f" 2>/dev/null || true
+              )
+            fi
+
+            for lib in "${libs[@]}"; do
+              [ -n "$lib" ] || continue
+              [ "$lib" = "$f" ] && continue
+              [ -e "$lib" ] || continue
+              copy_runtime_file "$lib"
+            done
+
+            interp="$(patchelf --print-interpreter "$f" 2>/dev/null || true)"
+            if [ -n "$interp" ] && [ -e "$interp" ]; then
+              copy_runtime_file "$interp"
+            fi
+          done < <(find "$STAGE" -type f -print0)
+
+          # Runtime files can themselves depend on other libraries. lddtree
+          # normally returns transitive closure, but do a second pass as a
+          # defensive check.
+          for round in 1 2; do
+            while IFS= read -r -d '' f; do
+              file "$f" | grep -q 'ELF' || continue
+
+              mapfile -t libs < <(
+                LD_LIBRARY_PATH="$PRIVATE${SEARCH_PATH:+:$SEARCH_PATH}" \
+                  lddtree -l "$f" 2>/dev/null || true
+              )
+
+              for lib in "${libs[@]}"; do
+                [ -n "$lib" ] || continue
+                [ "$lib" = "$f" ] && continue
+                [ -e "$lib" ] || continue
+                copy_runtime_file "$lib"
+              done
+            done < <(find "$PRIVATE" -type f -print0)
+          done
+
+          # Patch every dynamic ELF in the staged package to the private runtime.
+          while IFS= read -r -d '' f; do
+            file "$f" | grep -q 'ELF' || continue
+
+            if patchelf --print-rpath "$f" >/dev/null 2>&1; then
+              patchelf --set-rpath "/usr/lib/arc/$PACKAGE" "$f"
+            fi
+
+            interp="$(patchelf --print-interpreter "$f" 2>/dev/null || true)"
+            if [ -n "$interp" ]; then
+              private_interp="/usr/lib/arc/$PACKAGE/$(basename "$interp")"
+              test -f "$STAGE$private_interp"
+              patchelf --set-interpreter "$private_interp" "$f"
+            fi
+          done < <(find "$STAGE" -type f -print0)
+
+      # --------------------------------------------------------------------
+      # Build information for local Arc packaging.
+      # This is intentionally NOT .arc/meta.toml.
+      # --------------------------------------------------------------------
+      - name: Write build information
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$STAGE/usr/share/mercury-build-info"
+
+          cat > "$STAGE/usr/share/mercury-build-info/${PACKAGE}.txt" <<EOF
+          package=${PACKAGE}
+          upstream_version=${VERSION}
+          architecture=${ARCH}
+          github_run=${GITHUB_RUN_ID}
+          github_sha=${GITHUB_SHA}
+          EOF
+
+          if [ "$PACKAGE" = "linux" ] && [ -f "$RUNNER_TEMP/kernel-release" ]; then
+            echo "kernel_release=$(cat "$RUNNER_TEMP/kernel-release")" \
+              >> "$STAGE/usr/share/mercury-build-info/${PACKAGE}.txt"
+          fi
+
+          if [ "$PACKAGE" = "iwd" ]; then
+            echo "bundled_ell=0.83" \
+              >> "$STAGE/usr/share/mercury-build-info/${PACKAGE}.txt"
+          fi
+
+      # --------------------------------------------------------------------
+      # Basic static/dynamic report.
+      # --------------------------------------------------------------------
+      - name: Runtime report
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== $PACKAGE $VERSION ====="
+          du -sh "$STAGE"
+
+          while IFS= read -r -d '' f; do
+            if file "$f" | grep -q 'ELF'; then
+              echo
+              echo ">>> ${f#$STAGE}"
+              file "$f"
+              patchelf --print-interpreter "$f" 2>/dev/null || true
+              patchelf --print-rpath "$f" 2>/dev/null || true
+              patchelf --print-needed "$f" 2>/dev/null || true
+            fi
+          done < <(find "$STAGE" -type f -print0)
+
+      # --------------------------------------------------------------------
+      # Compress each staged package separately.
+      #
+      # actions/upload-artifact downloads as its own ZIP; the ZIP contains
+      # one high-compression .tar.xz staging archive.
+      # --------------------------------------------------------------------
+      - name: Create staging tar.xz
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARCHIVE="$OUT/${PACKAGE}-${VERSION}-${ARCH}.tar.xz"
+
+          XZ_OPT="-9e -T0" \
+            tar \
+              --sort=name \
+              --owner=0 \
+              --group=0 \
+              --numeric-owner \
+              -C "$STAGE" \
+              -cJf "$ARCHIVE" .
+
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+
+          ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
+
+      - name: Upload separate package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mercury-${{ matrix.package }}-${{ matrix.version }}-${{ env.ARCH }}
+          path: |
+            ${{ env.OUT }}/${{ matrix.package }}-${{ matrix.version }}-${{ env.ARCH }}.tar.xz
+            ${{ env.OUT }}/${{ matrix.package }}-${{ matrix.version }}-${{ env.ARCH }}.tar.xz.sha256
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
