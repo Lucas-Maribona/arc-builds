@@ -403,7 +403,7 @@ jobs:
             libseccomp-dev \
             libselinux1-dev \
             libssl-dev \
-            libxz-dev \
+            liblzma-dev \
             libzstd-dev
 
           cd "$SRC"
