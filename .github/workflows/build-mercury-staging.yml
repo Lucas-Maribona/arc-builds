@@ -420,6 +420,12 @@ jobs:
             --localstatedir=/var \
             --buildtype=release \
             -Dtests=false \
+            -Dslow-tests=false \
+            -Dfuzz-tests=false \
+            -Dinstall-tests=false \
+            -Ddlopen-tests=false \
+            -Dglib=disabled \
+            -Ddbus=disabled \
             -Dman=false \
             -Dbpf-framework=disabled
           
